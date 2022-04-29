@@ -1,0 +1,769 @@
+---
+title: "What makes a program hard to get in?"
+subtitle: "An exploratory project"
+author: "Tsai Lintung"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+---
+
+<style type="text/css">
+  body{
+  font-size: 13pt;
+}
+</style>
+
+Created: 2022/2/10  
+Last update: 2022/4/22  
+*This report is generated with knitr, the R notebook version can be found [here](https://drive.google.com/file/d/1__w6p63_WC3UnwlhtYkORESoyyjrbBHm/view?usp=sharing).*
+
+# 1 Introduction
+
+I create this independent project for two purposes. First, I want to understand what makes undergraduate programs in Taiwan selective. Why is competition in some programs more fierce than in others?  Second, I want to improve my skill with R. 
+
+Unlike the tidy data from WDI and other international databases, datasets from the Taiwanese government provide many opportunities for me to improve my data wrangling skill. I learn how to 
+
+* Parse Chinese strings with regular expression,
+
+* Merge datasets with different index systems,
+
+* Deal with character encoding problems,
+
+* Do web scraping.
+
+I'm satisfied with the learning purpose of this project, but not as much with the other. The findings are scarce and not rigorous. This comes partly from the limitations with publicly available data, and partly from the lack of identification strategy. In the end, this project sparks more questions than it answers.  
+
+Because of the learning purpose of this project, this is not a standard data report. In the following parts, I include most code and comment on interesting problems to tackle. 
+
+# 2 Data
+
+The focus is on the selectiveness of programs, and what explains them. For selectiveness, I collect the minimum scores of admittance to Advanced Subject Test (指考) for undergraduate programs. 
+
+To explain them, I try to scrape data from 104.com for salaries and find datasets from the Ministry of Education (MOE) for information about schools and majors. Everything is merged with reference tables from MOE. 
+
+```{r Setup, echo = FALSE, message = FALSE, warning=FALSE}
+
+# Clear the working space
+rm(list = ls())
+
+# Set working directory
+setwd("G:/我的雲端硬碟/Data Science/Major&Score")
+
+# load packages
+library(tidyverse) #bread and butter
+library(stargazer) #summary of regression
+library(sandwich) #for Heteroskesticity robust SE
+library(xml2) #web
+library(readxl) #web
+library(stringi) #locale-insensitive string manupulation
+library(rvest) #web
+library(skimr) #summary of datasets
+library(Rmisc) #multiplot
+
+# turn off scientific notation
+options(scipen = 9)
+
+# turn off some statistics in skimr
+my_skim <- skim_with(base = sfl(missing = n_missing), 
+                     numeric = sfl(p25 = NULL, p75 = NULL, hist = NULL),
+                     factor = sfl(ordered = NULL))
+
+```
+## 2.1 Major and School reference table
+**Data source:** https://ws.moe.edu.tw/001/Upload/4/relfile/0/5040/02797dd0-2c24-43f9-b3e6-8844d1a25620.csv
+
+After setting up, I import a reference table from MOE that contains all undergraduate programs in Taiwan and their associated majors and school. Every school has its unique index, for example, National Taiwan University is "3". 
+
+Almost all majors fall into a 4-level system. The lowest level is major, like "經濟系". The second is the domain, like "經濟學", the third is the big domain, like "社會與行為科學" and the highest level is the area, like "社會科學、新聞學及圖書資訊". Each level has an index. I keep all of them because there will be datasets on different levels to be merged. 
+
+MOE further classifies areas into three types, "人文", "社會", or "科技". I hard-coded it because it's not in the reference table. I call it *bigarea*.
+
+**Reading CSV in Chinese**
+
+After I change the environment language, disable some default behaviors, and understand the difference between UTF-8 and UTF-8-BOM encoding, *read.csv* runs consistently for the rest of the project. 
+
+```{r Reference table, message = FALSE, warning = FALSE}
+
+#load csv, column names need to be first dropped otherwise read.csv don't work 
+majortable_path = "02797dd0-2c24-43f9-b3e6-8844d1a25620.csv"
+majortable <- read.csv(majortable_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
+
+#rename columns while dropiing unused columns
+majortable <- majortable %>% transmute(school = V4, sc_index = as.factor(V1), 
+                                       public = (V2 == "公立"), 
+                                       major = V12, ma_index = as.factor(V11), 
+                                       area = as.factor(V6), area_index = as.factor(V5),
+                                       bigdomain = as.factor(V8), bigdom_index = as.factor(V7), 
+                                       domain = as.factor(V10), dom_index = as.factor(V9))
+
+#shorten names for areas 
+levels(majortable$area) <- list(Medicine = "醫藥衛生及社會福利",
+                                Engineering = "工程、製造及營建", 
+                                Science = "自然科學、數學及統計", 
+                                Agriculture = "農業、林業、漁業及獸醫",
+                                Information = "資訊通訊科技", 
+                                BusNLaw = "商業、管理及法律", 
+                                SocialSc = "社會科學、新聞學及圖書資訊", 
+                                Service = "服務", 
+                                Arts = "藝術及人文", 
+                                Education = "教育", 
+                                Other = "其他")
+
+# while there is duplicating rows with same school and major index, keep getting rid of duplicating rows
+while (nrow(majortable[duplicated(majortable[c("sc_index", "ma_index")]) | duplicated(majortable[c("sc_index", "ma_index")], fromLast = TRUE),]) != 0){ 
+  
+    majortable <- majortable[!duplicated(majortable[c("sc_index", "ma_index")]) | duplicated(majortable[c("sc_index", "ma_index")], fromLast = TRUE),]
+    
+}
+
+#create bigarea, check source at https://depart.moe.edu.tw/ED4500/cp.aspx?n=283412AE33AC4D71
+STEM_area = c("Medicine", "Engineering", "Science", "Agriculture", "Information")
+Soc_area = c("BusNLaw", "SocialSc", "Service")
+Huma_area = c("Arts", "Education", "Other")
+majortable <- majortable %>% mutate(bigarea = ifelse(is.element(area, STEM_area), "STEM", 
+                                              ifelse(is.element(area, Soc_area), "Social", 
+                                              ifelse(is.element(area, Huma_area), "Human", NA))))
+```
+
+## 2.2 Minimum score of admittance in AST
+**Data source:** https://www.uac.edu.tw/downloads.htm
+
+The Taiwanese education system provides a simple measure for selectiveness: admittance scores in public tests. I choose AST (指考) over GSAT (學測) since admittance in GSAT is affected by factors like the learning portfolio, but the downside is that scores in AST are not standardized as in GSAT, this will be addressed later. 
+
+From the University Admission Committee website, I download the minimum scores of admittance for year 110.
+
+**Data files in PDF**
+
+Data from MOE are often in PDF format. After trying a few R packages, I turn to an external application, [tabula](https://tabula.technology/). It transforms PDFs into CSVs. 
+
+**Sub-programs within programs**
+
+The smallest unit of admittance is the sub-program. For example, the political science department of NTU offers three sub-programs, "國際關係組", "比較政治組", and "公共行政組". However, the AST dataset uses its own index. So I need to match it with the reference table with the names of school and major. That means I first need to summarize the sub-programs into programs. 
+
+I need to parse the name of the subprograms into programs, for example, from "政治系國際關係組" to just "政治系". First I delete everything after "系". But this also reduces "工程與*系*統科學系" into "工程與系". So "系統" needs to be an exception. But then "*系統*科學組" is not deleted, so it needs to be an exception within the exception. 
+
+A multi-layered REGEX can also solve the problem, but I think the multi-line solution is more readable. Another option is to get the index for the last "系" or "學程" and delete characters afterward, but there is a program named "精密*系*統設計學士學位學程".
+
+```{r AST, message = FALSE, warning = FALSE}
+
+#load csv
+score_path = "tabula-110_04.csv"
+mns <- read.csv(score_path, check.names = FALSE, quote="", header = FALSE, stringsAsFactors=FALSE) %>% as_tibble()
+
+#rename columns whild dropping unused ones
+mns <- mns %>% transmute(index = as.factor(as.integer(V1)), school = as.factor(V2), size = as.integer(V5), score = as.double(V6), abscore = as.double(V8), oldmajor = V3, weighttxt = V4) %>% subset(!is.na(index))
+
+#reduce major name to just "XX系", "XX學程", 
+mns$major <- sub("統計科學組", "", mns$oldmajor) #系統科學組 is a sub-program, delete
+mns$major <- sub("系統", "placeholder", mns$major) #系統科學 is a program, not to delete
+mns$major <- sub("系..*", "系", mns$major) #delete chrs after 系
+mns$major <- sub("placeholder", "系統", mns$major)
+mns$major <- sub("學程..*", "學程", mns$major)
+mns$major <- sub("\"", "", mns$major)
+
+#merge with majortable
+mns <- merge(mns, majortable, by =c("major", "school"), all.x = TRUE, all.y = FALSE)
+
+#turn major back into a factor
+mns <- mns %>% mutate(major = as.factor(major), bigarea = as.factor(bigarea))
+```
+
+## 2.3 Averaging admittance score
+
+Different programs consider different subjects and aggregate them with different weightings. So the total minimum score of admittance needs to be averaged to reflect selectiveness. 
+ 
+**String Parsing in Chinese**
+
+Weightings are reported but in an inconvenient format. For example, the weighting of NTU Economics is reported as "國x1.00 英x1.50 數乙x2.00". I need to parse it into subject-specific weightings. 
+
+The go-to package *stringr* is not consistent with Chinese. Sometimes, "國" is not detected in "國x1.25", but "英" somehow is. I believe this is a problem with the locale setting. So I use the byte-wise matching method in package *stringi*. It is insensitive to locale. 
+
+The average score can then be calculated with the total score and total weighting. I then average the score of sub-programs into the score of the program. 
+
+**Adjusting for difficulty difference**
+
+I notice that the average score of non-STEM majors like law and Chinese is a lot higher than expected. This is because subjects differ in difficulty, and in general STEM subjects like physics and Math have a lower average.  
+
+For example, in year 110, the median score of Math A (數甲) is 38, while the median of Math B (數乙) is 54. The difference makes NTU finance (considers Math B) have a higher average score than NTU Medicine (considers Math A).
+
+To tackle this, I introduce a "difficulty-adjusted weighting". I multiply the weightings of a subject by its relative median score (mean is not available). This way programs that weight easier subjects will have a higher total weighting when averaging, and thus a lower mean score. 
+
+There are issues. The meaning of standardizing weightings is ambiguous, and it makes NTU medicine have an average score of over 100. But since there are no subject-specific scores to be standardized, I judge that the difficulty difference problem is more severe than the issues with this solution. 
+
+```{r Averaging, message = FALSE, warning = FALSE}
+
+#create dataframe to store weightings
+wlist = tibble(
+  index = c(1:nrow(mns)),
+  chi = NA, #國
+  eng = NA, #英
+  maa = NA, #數甲
+  mab = NA, #數乙 
+  his = NA, #歷
+  geo = NA, #地
+  soc = NA, #公
+  phy = NA, #物
+  chm = NA, #化
+  bio = NA, #生
+  pro = NA  #術
+)
+
+#this function find the subject-specific weightings from the weightings string
+findweight = function(temp, subject){
+  
+  place = NA
+  weight = 0
+  
+  place <- temp %>% stri_locate_first(fixed = fixed(subject))
+  weight <- temp %>% str_sub(place[[2]]+2, place[[2]]+5) %>% as.double()
+  
+  if (is.na(weight)){
+    return(0)
+  }else{
+    return(weight)
+  }
+}
+
+#vectorize the function to speed up 
+vfindweight <- Vectorize(findweight)
+
+subject_list = c("國", "英", "數甲", "數乙", "歷", "地", "公", "物", "化", "生", "術")
+for(i in c(1:length(subject_list))){
+  wlist[i+1] <- mns$weighttxt %>% vfindweight(subject_list[i])
+}
+
+
+#median score of 110 test, also from the Admission Committee
+med = c(60, 54, 38, 54, 70, 62, 56, 38, 51, 60) 
+med = med/mean(med) #normalize
+
+#calculate total weight and adjusted weight
+wlist <- wlist %>% mutate(weight = chi + eng + maa + mab + his + geo + soc + phy + chm + bio + pro,
+                          ad_weight = chi*med[[1]] + eng*med[[2]] + maa*med[[3]] + mab*med[[4]] + 
+                                      his*med[[5]] + geo*med[[6]] + soc*med[[7]] + phy*med[[8]] + 
+                                      chm*med[[9]] + bio*med[[10]] + pro)
+
+#compute average weight and adjusted average weights
+mns$av_score <- mns$score/wlist$weight
+mns$adav_score <- mns$score/wlist$ad_weight
+
+#averge the score of sub-program into program
+temp <- mns %>% group_by(index) %>% dplyr::summarize(temp_score = mean(adav_score, na.rm = TRUE)) 
+mns <- merge(mns, temp, by = "index") %>% mutate(adav_score = temp_score)
+
+#get rid of sub-programs once the score is averaged
+mns <- mns[!duplicated(mns$index),]
+```
+
+## 2.4 Data from MOE
+**Data Source:** https://udb.moe.edu.tw/
+
+To explain the selectiveness, I now turn to data about the programs. 
+
+On the University Database (教育部大專校院校務資訊公開平臺), MOE provides information from universities, some of them are at the program level, and others at the school level. 
+
+For program-level data, I import data on the teacher-student ratio and the tuition. For school-level data, I import data on the school-wise teacher-student ratio and financial information like the debt-to-asset ratio, tuition-to-income ratio, and total income per student. 
+
+I exclude the code because the datasets are tidy and the code is just importing, transformation and merging. 
+
+```{r MOE program, echo = FALSE,message = FALSE, warning = FALSE}
+
+#student teacher ratio
+teacher_path = "majorteacher.csv"
+teacher <- read.csv(teacher_path, header = FALSE, skip = 1, check.names = FALSE, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
+teacher <- teacher %>% subset(V1 == 109) %>%  transmute(ma_index = as.factor(as.integer(V6)), 
+                                                        sc_index = as.factor(as.integer(V4)), 
+                                                        teacher = as.integer(V8)) 
+
+#data saparates bachelor, master, and phd students and teachers, I aggregate them since they share the resources
+teacher <- teacher %>% group_by(ma_index, sc_index) %>% dplyr::summarize(.groups = "keep", teacher = sum(teacher))
+
+student_path = "majorstudent.csv"
+student <- read.csv(student_path, header = FALSE, skip = 1, check.names = FALSE, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
+student <- student %>% subset(V1 == 109) %>%  transmute(ma_index = as.factor(as.integer(V6)), 
+                                                        sc_index = as.factor(as.integer(V4)), 
+                                                        student = as.integer(V9))
+
+student <- student %>% group_by(ma_index, sc_index) %>% dplyr::summarize(.groups = "keep", student = sum(student))
+
+ts <- merge(student, teacher, by = c("ma_index", "sc_index"))
+ts <- ts %>% mutate(ts_ratio = student/teacher)
+
+tuition_path = "tuition.csv"
+tuition <- read.csv(tuition_path, header = FALSE, skip = 1, check.names = FALSE, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
+tuition <- tuition %>% subset(V1 == 109) %>%  transmute(ma_index = as.factor(as.integer(V6)), 
+                                                        sc_index = as.factor(as.integer(V4)), 
+                                                        tuition = as.integer(V9)+as.integer(V10)) #tuition is 學費+雜費
+
+tuition <- merge(tuition, ts, by = c("ma_index", "sc_index"), all.x = TRUE, all.y = TRUE)
+mns <- merge(mns, tuition, by = c("ma_index", "sc_index"), all.x = TRUE, all.y = FALSE)
+```
+
+
+```{r MOE school, echo = FALSE, message = FALSE, warning = FALSE}
+
+ts_path = "teacherstudent.csv"
+ts_ratio <- read.csv(ts_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
+ts_ratio <- ts_ratio %>% subset(V1 == 109) %>%  transmute(index = as.factor(as.integer(V4)), sc_size = V6, sc_teacher = V7, scts_ratio = V8) 
+
+financial_pu_path = "financial_public.csv"
+finan_pu <- read.csv(financial_pu_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
+finan_pu <- finan_pu %>% subset(V1 == 109) %>%  transmute(index = as.factor(as.integer(V4)), asset = V7, debt_ratio = V8) 
+
+financial_pr_path = "financial_private.csv"
+finan_pr <- read.csv(financial_pr_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
+finan_pr <- finan_pr %>% subset(V1 == 109) %>%  transmute(index = as.factor(as.integer(V4)), asset = V7, debt_ratio = V8) 
+
+finan <- rbind(finan_pr, finan_pu)
+
+budget_pu_path = "budget_public.csv"
+bud_pu <- read.csv(budget_pu_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
+bud_pu <- bud_pu %>%  subset(V1 == 109) %>% transmute(index = as.factor(as.integer(V4)), income = V7, tuition_ratio = V8)
+
+budget_pr_path = "budget_private.csv"
+bud_pr <- read.csv(budget_pr_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
+bud_pr <- bud_pr %>%  subset(V1 == 109) %>% transmute(index = as.factor(as.integer(V4)), income = V7, tuition_ratio = V8)
+
+budget <- rbind(bud_pr, bud_pu)
+
+budget <- merge(budget, ts_ratio, by = "index", all.x = TRUE, all.y = FALSE)
+budget <- merge(budget, finan, by = "index", all.x = TRUE, all.y = FALSE)
+budget <- budget %>% mutate(income_per_student = income / sc_size)
+
+mns <- merge(mns, budget, by.x = "sc_index", by.y = "index")
+```
+
+## 2.5 Employment outcome
+**Data source**: https://data.gov.tw/dataset/31158
+
+The future career prospect is an important factor in students' decisions on programs. 
+
+104.com (the Job Bank) reports the salary of alumni from a program. In the process of retrieving the data, I learn a lot about web scraping. However, the data quality turns out to be very poor. I decide to cut it out from the main report and leave it in the appendix. 
+
+Although there are no other salary data at the program level, a dataset from MOE reports the employment outcome of fresh graduates from different domains. 
+
+It reports the salary and employment rate three or four years after students graduate. For example, four years after graduation, 87% of students from the economics domain participate in the labor market and earn an average salary of 39562$. The participation rate carries little meaning, since students pursuing masters are also not in the market.  
+
+Note that the dataset is outdated (the year 103 employment status of the class of year 99), but I cannot find more recent data.
+
+**Discrepency between index systems**
+
+This dataset uses a 4-digit domain index, which is not in the reference table. This is because there was a classification reform in year 106, and the dataset uses the old index. Thanks to a table between the old index and the new index from MOE (in a very messy PDF), I create a mapping between the two indexes. 
+
+```{r MOE Employment, message = FALSE, warning = FALSE}
+
+#create the mapping between old and new index from the old-new index table
+
+#the pdf is from https://stats.moe.gov.tw/files/bcode/10609_5最近兩次修正架構對照表.pdf, and transformed to csv with tabula
+mapping_path = "reference.csv"
+index_mapping <- read.csv(mapping_path,check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble() %>% transmute(new_index = V2, old_index = V3) 
+
+index_mapping <- index_mapping %>% mutate(old_index = str_extract(old_index, "\\d+"), 
+                                          new_index = str_extract(new_index, "\\d+")) %>% 
+                                   mutate(old_index = as.factor(old_index), 
+                                          new_index = as.character(as.integer(new_index))) %>% #get rid of 0s
+                                   subset(!(is.na(old_index))|!(is.na(new_index))) #there is many empty rows
+
+newindex = NA
+#the table was in a weird format, tidy it. 
+for (i in c(1:nrow(index_mapping))){
+  if(!is.na(index_mapping$new_index[i])){
+    newindex = index_mapping$new_index[i]
+  } else {
+    index_mapping$new_index[i] = newindex
+  }
+}
+index_mapping <- index_mapping %>% subset(!is.na(old_index)) 
+
+#import the employment outcome
+domain_outcome_path = "學類.csv"
+domout <- read.csv(domain_outcome_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
+
+domout <- domout %>% transmute(old_index = as.factor(V1), 
+                               old_dom = as.factor(V2), 
+                               salary_4y = as.integer(V19), 
+                               employ_4y = as.double(str_extract(V20, "\\d+"))/100)
+
+#merge with mapping for matching with new index
+domout <- merge(domout, index_mapping, by = "old_index")
+
+#old domain is more detailed than new, so grouped into statistics for new domain
+domout <- domout %>% group_by(new_index) %>% dplyr::summarize(salary_4y = mean(salary_4y, na.rm = TRUE),
+                                                       employ_4y = mean(employ_4y, na.rm = TRUE)) 
+#there is an extra 0 at the start of new_index
+domout <- domout %>% mutate(new = as.factor(as.integer(new_index)))
+
+#merge with main dataset
+mns <- merge(mns, domout, by.x = "dom_index", by.y = "new_index")
+```
+
+## 2.6 Schools, Domains and MNS
+
+Before leaving the data section, I drop unused variables in *mns* and summarize *mns* into two grouped datasets, *domains* and *schools* that help with future analysis. These are the three datasets I will perform exploration and analysis on. 
+
+I also create a dummy *med* to track the ratio of students that is in the domain of medicine. I define medical school as having more than 30% of their student in medicine-related majors. They tend to be anomalies.
+
+I only show the code for *domains* since they are similar. 
+
+```{r Domains, message = FALSE, warning = FALSE, out.width = '80%'}
+#create a dataset for domain-wise comparison
+domains <- mns %>% group_by(domain) %>% dplyr::summarize(index = as.factor(last(dom_index)),
+                                                         area = last(area),
+                                                         bigdomain = last(bigdomain),
+                                                         bigdom_index = last(bigdom_index),
+                                                         bigarea = last(bigarea),
+                                                         score = mean(adav_score, na.rm = TRUE), 
+                                                         tuition = mean(tuition, na.rm = TRUE),
+                                                         count = n(),
+                                                         size = sum(size, na.rm = TRUE))
+
+#combine with domain-level data
+domains <- merge(domains, domout, by.x = "index", by.y = "new_index", all.x = TRUE, all.y = FALSE) %>% select(!new)
+```
+
+
+```{r Schools, echo = FALSE, message = FALSE, warning = FALSE, out.width = '80%'}
+#create a dataset for school-wise comparison
+schools <- mns %>% group_by(school) %>% dplyr::summarize(index = last(sc_index),
+                                                         public = last(public),
+                                                         score = mean(adav_score, na.rm = TRUE), 
+                                                         tuition = mean(tuition, na.rm = TRUE),
+                                                         med = sum((bigdom_index == 91)*size, na.rm = TRUE) 
+                                                                    /sum(size, na.rm = TRUE),
+                                                         med_school = med > 0.3,
+                                                         majorcount = n(),
+                                                         stem = mean(bigarea == "STEM", na.rm = TRUE))
+ 
+#combine with school-level data
+schools <- merge(schools, budget, by = "index", all.x = TRUE, all.y = FALSE)
+```
+
+
+```{r MNS clean up, echo = FALSE, message = FALSE, warning = FALSE}
+
+#tract whether the program is in a medical school
+mns <- merge(mns, select(schools, index, med_school), by.x = "sc_index", by.y = "index", )
+
+
+#leave only useful column in mns
+mns <- mns %>% select(index, major, school,  public,med_school, size, adav_score, bigarea, area, bigdomain, domain, salary_4y, employ_4y, ts_ratio, asset, debt_ratio, income, income_per_student, tuition, tuition_ratio)
+
+#clean unneeded data before moving on
+rm(domout, index_mapping, domain_sal_coef, domain_score_coef, finan, finan_pr, finan_pu, ts_ratio, bud_pr, bud_pu, budget, school_sal_coef, school_score_coef, temp, majortable, wlist, student, teacher, ts, tuition)
+```
+
+# 3 Exploration
+
+Now with the data prepared, I can start exploring. The code is not interesting so I do not include them.  
+
+## 3.1 Program exploration 
+
+**Missing values**
+
+Let's summarize the *mns* dataset with *knitr*. 
+
+Some programs have missing scores and sizes. They are programs in low-priority schools and majors. I guess that these programs have more quotas than applicants, so the minimum admittance score is inapplicable. I then confirm this by checking another dataset from the University Admission Committee (not presented here). 
+
+Programs with missing teacher-student ratios are "no-major" programs like "理學院學士班" in National Tsing Hua University, so the ratio is not applicable.
+
+***
+
+```{r Program summary, echo = FALSE, message = FALSE, warning = FALSE, R.options = list(width = 80)}
+my_skim(mns)
+
+```
+
+***
+**Score distribution**
+
+There seem to be two modes in the distribution of scores. Why? 
+
+Separating the programs by big area does not change the distribution. But separating by either public-ness or high income per student (yearly income per student of the school is over 400k) separates the modes, and creates two distributions that both look more "normal". 
+
+Public-ness and income per student (and teacher to student ratio) are all highly correlated, so it's hard to differentiate. Nor can I explain the seemingly-separate distributions.  
+
+```{r Distribution, echo = FALSE,  message = FALSE, warning = FALSE, fig.dim = c(10, 4)}
+p1 <- mns %>% ggplot(aes(x = adav_score))+geom_density()+labs(title = "Score")
+p2 <- mns %>% ggplot(aes(x = adav_score, color = bigarea))+geom_density()+labs(title = "Score, by bigarea") + theme(legend.position="bottom")
+p3 <- mns %>% ggplot(aes(x = adav_score, color = public))+geom_density()+labs(title = "Score, by public") + theme(legend.position="bottom")
+p4 <- mns %>% mutate(high_income  = (income_per_student > 400))%>% ggplot(aes(x = adav_score, color = high_income))+geom_density()+labs(title = "Score, by income") + theme(legend.position="bottom")
+multiplot(p1, p2, p3, p4, cols = 4)
+```
+
+**Resource and Tuition**
+
+There is an outlier in tuition, "企業管理學系" in "中華大學" with a tuition of 125000$. I exclude it in the visualization because it compress the graph too much.  
+
+The relationship between score and tuition is negative. But it does not persist after separating public and private schools. So it comes from the fact that private schools are more expensive and less selective. Saparating by big area shows that the difference within public or private schools is mainly driven by the difference in domain, STEM programs usually have a higher tuition. 
+
+There is a negative relationship between score and teacher-student ratio (it persists after separating public and private schools). This is expected as more teachers means better quality.
+
+
+```{r TS ratio, echo = FALSE, message = FALSE, warning = FALSE, fig.dim = c(10, 4)}
+p1 <- mns %>% subset(tuition < 100000) %>% ggplot(aes(y = adav_score, x = tuition))+geom_point()+geom_smooth(method = lm)+labs(title = "Tuition to score")+ theme(legend.position="bottom")
+p2 <- mns %>% subset(tuition < 100000)%>% ggplot(aes(y = adav_score, x = tuition, color = public))+geom_point()+geom_smooth(method = lm)+labs(title = "By public")+ theme(legend.position="bottom")
+p3 <- mns %>% subset(tuition < 100000)%>% ggplot(aes(y = adav_score, x = tuition, color = bigarea))+geom_point()+labs(title = "By bigarea")+ theme(legend.position="bottom")
+p4 <- mns %>% subset(tuition < 100000)%>% ggplot(aes(y = adav_score, x = ts_ratio))+geom_point()+geom_smooth(method = lm)+labs(title = "TS ratio to score")
+multiplot(p1, p2, p3, p4 , cols = 4)
+```
+
+## 3.2 Domain exploration
+
+I have few variables that are at the program level, so I will move on to explore at the school and domain levels. 
+
+**Score by area**
+
+The competition for medicine is the most fierce, as expected. The service area is the least selective. Aside from these two areas, other areas seem quite similar.
+
+The area "Other" contains only one program, the "人文暨科技跨領域學士學位學程" at National Sun Yat-sen University. 
+
+```{r Arae n Score, echo = FALSE, message = FALSE, warning = FALSE}
+mns %>% ggplot(aes(y = adav_score, x = area, color = bigarea))+geom_boxplot()+labs(title = "Area to score")+ theme(legend.position="bottom")
+```
+
+**Employment Outcome**
+
+The distribution of employment outcomes is quite concentrated at around 35000$ in salary and 85% in labor participation, but there are a few outliers. The high-salary outlier is "醫學", and the low-participation outliers are "藝術" and "電力與能源". I exclude them from other visualizations.
+
+There is no visible difference in employment outcomes between big areas. As expected, a high salary is related to selectiveness.
+
+```{r Domain explore, echo = FALSE, message = FALSE, warning = FALSE, fig.dim = c(10, 4)}
+p1 <- domains %>% ggplot(aes(y = employ_4y, x = salary_4y)) + geom_point() + labs(title = "Salary to employ") + theme(legend.position="bottom")
+p2 <- domains %>% subset(!is.element(domain, c("電力與能源", "藝術", "醫學"))) %>% ggplot(aes(y = employ_4y, x = salary_4y, color = bigarea)) + geom_point() + labs(title = "No outlier, by bigarea") + theme(legend.position="bottom")
+p3 <- domains %>%  subset(!is.element(domain, c("醫學")))%>% ggplot(aes(y = score, x = salary_4y)) + geom_point() + geom_smooth(method = lm)+ labs(title = "Salary to score") + theme(legend.position="bottom")
+p4 <- domains %>%  subset(!is.element(domain, c("電力與能源", "藝術")))%>% ggplot(aes(y = score, x = employ_4y)) + geom_point() + geom_smooth(method = lm)+ labs(title = "Parti to score") + theme(legend.position="bottom")
+multiplot(p1, p2, p3, p4, cols = 4)
+```
+
+## 3.3 School exploration
+
+**Public versus private**
+
+Private schools have a much lower score than public schools. They also have fewer teachers (high teacher-student ratio) and their students get fewer resources with the tuition they paid (high tuition-to-income ratio). 
+
+The four outliers in private schools with more resources and higher scores are all medical schools (triangles in the graph). I think these schools have higher scores because medicine is a selective domain, and more resources because of school-affiliated hospitals. Perhaps the average scores are inflated because they only offer medicine-related programs.
+
+```{r Med School, echo = FALSE, message = FALSE, warning = FALSE, fig.dim = c(10, 4)}
+#medical schools are really different
+p1 <- schools %>% ggplot(aes(x = public, y = score)) + geom_boxplot()+ labs(title = "Public to score") + theme(legend.position="bottom")
+
+p2 <- schools %>% ggplot(aes(x = scts_ratio, y = tuition_ratio, color = public)) + geom_point()+ labs(title = "T-S and tuition ratio, by public") + theme(legend.position="bottom")
+
+p3 <- schools %>% ggplot(aes(x = scts_ratio, y = tuition_ratio, color = !med_school)) + geom_point()+ labs(title = "T-S and tuition ratio, by med") + theme(legend.position="bottom")
+
+multiplot(p1, p2, p3, cols = 3)
+
+```
+
+**Resource and Tuition, by school**
+
+Excluding medical schools, the relationship between score and resources seems to differ between public and private schools.   
+
+For public schools, high scores are correlated with more teachers and a low tuition ratio. But for private schools, high scores are correlated with fewer teachers and have no visual relationship with the tuition ratio.
+
+Only looking at public schools, the "Big-four"(台清交成) stands out in the top left. They are well funded (low tuition ratio) and the most selective There are also "the Chungs" (中字輩). These four schools are less funded and less selective than the big 4, but still distinct from the rest of the peck.
+
+```{r SChool resource and tuition, echo = FALSE, message = FALSE, warning = FALSE, fig.dim = c(10, 4)}
+p1 <- schools %>% subset(!med_school) %>% ggplot(aes(x = scts_ratio, y = score, color = public)) + geom_point() + geom_smooth(method = lm) + labs(title = "TS ratio to score, by public") + theme(legend.position="bottom")
+
+p2 <- schools %>% subset(!med_school) %>% ggplot(aes(x = tuition_ratio, y = score, color = public)) + geom_point() + geom_smooth(method = lm)+ labs(title = "Tuition ratio to score, by public") + theme(legend.position="bottom")
+
+p3 <- schools %>% subset(public) %>% ggplot(aes(x = tuition_ratio, y = score)) + geom_point() + geom_smooth(method = lm)+ labs(title = "Tuition ratio to score, only public") + theme(legend.position="bottom")
+
+multiplot(p1, p2, p3, p4, cols = 4)
+rm(p1, p2, p3, p4)
+```
+
+# 4 Analysis
+
+## 4.1 Saparating schools and domains
+
+I'm curious about the mundane questions like what is the best school, or what is the best domain. So I run a regression by putting all schools and domains as dummy variables. This is just separating their selectiveness, rather than explaining. 
+
+I report the regression coefficients below. To avoid perfect collinearity, "大同大學" in schools and "化學" in domains are the respective intercepts for schools and domains (when all dummy = 0). 
+
+I guess earlier that the average score of medical schools is inflated. This is confirmed by comparing the ranking of the average score in the data and the coefficient estimated here. The Taipei Medical University, which is ranked 2 in the averages, is ranked 11 in the coefficients. The pattern repeats in other medical schools. 
+
+Unsurprisingly, medicine is the queen of domains. National Chiao Tung University surpasses National Taiwan University.
+
+```{r School and Major reg, message=FALSE, warning=FALSE, results = 'asis'}
+reg1 <- lm(adav_score ~ school + domain , data = mns)
+
+coef <- tibble(name = names(reg1$coefficients), 
+               coef = unname(reg1$coefficients))
+
+school_coef <- coef %>% subset(stri_detect_fixed(name, "school")) %>% #intercept is 大同大學
+                        mutate(name = sub( "school", "", name)) %>% 
+                        arrange(-coef) 
+
+domain_coef <- coef %>% subset(stri_detect_fixed(name, "domain")) %>% #intercept is 化學
+                        mutate(name = sub( "domain", "", name)) %>% 
+                        arrange(-coef) 
+
+paste(domain_coef$name, round(domain_coef$coef,1), sep = ": ", collapse = ", ")
+paste(school_coef$name, round(school_coef$coef,1), sep = ": ", collapse = ", ")
+
+```
+
+## 4.2 Explaining program selectiveness
+
+I'm hesitant of running this regression. Most variables are both affecting and affected by selectiveness. Good employment outcome attracts good students, but good students also have good employment outcomes. Second, there are many omitted variables. 
+
+With that being said, the project will not be complete without trying to explain the variation in selectiveness
+
+The income per student and salary have the expected sign. The coefficients for public-ness are significantly positive for all regressions. This suggests either there is a premium in public-ness itself, or that there are advantages of public schools not included here. 
+
+The coefficient for STEM changes signs when resource-related variables are included. The teacher-student ratio, tuition, and employment rate do not have the expected signs. I do not have good explanations. 
+
+```{r Score reg, message=FALSE, warning=FALSE, results = 'asis'}
+#funciton for heteroskesticity-robust SE
+cse = function(reg) {
+  rob = sqrt(diag(vcovHC(reg, type = "HC1")))
+  return(rob)
+}
+
+reg2_1 <- lm(adav_score ~ public + bigarea, data = mns)
+reg2_2 <- lm(adav_score ~ public + bigarea  + ts_ratio + tuition + income_per_student, data = mns)
+reg2_3 <- lm(adav_score ~ public + bigarea  + salary_4y + employ_4y, data = mns)
+reg2_4 <- lm(adav_score ~ public + bigarea  + ts_ratio + tuition + income_per_student + salary_4y + employ_4y, data = mns)
+
+
+stargazer(reg2_1, reg2_2, reg2_3, reg2_4, 
+          se=list(cse(reg2_1), cse(reg2_2), cse(reg2_3), cse(reg2_4)), 
+          title="Explaining program selectiveness", type="html", 
+          df=FALSE, digits=3)
+```
+
+# 5 Conclusion
+
+The data confirm common beliefs like public schools are more selective and medicine is hyper selective. However, the lack of difference between big areas is surprising. The strong relationship between resource and selectiveness resonates with the idea that the education system subsidizes more competitive, and thus wealthier students.  
+
+For future follow-ups, coming up with an identification strategy to disentangle the interaction between selectiveness and outcome will be the most interesting. Regression discontinuity comes to mind. 
+
+There are many more variables to be included. There are two datasets that I believe exist but are just not available, research output and program-level employment. MOE publishes the top 10 schools in CNCI (大學學域論文引用影響力指標) in 2020, so there should be data on research output for schools, and possible domains.  
+
+MOE also has a system named "大專畢業生就業追蹤系統", which includes detailed data on the salary and employment of college graduates, possibly at the individual level. 
+
+This cross-section data can also be quite easily scaled into a panel data. 
+
+# Appendix: Web scraping and 104.com
+
+**Web Scraping**
+
+Conveniently, URLs for specific programs are combinations of school index and major index. This allows me to skip the Web crawling and can directly access the webpage of a specific major by gluing the corresponding URL. The scraping takes a while to run, so I cache the data locally, and only re-run the scraping when needed. 
+
+**Problems with 104 salary data**
+
+Despite successfully retrieving the salary data from 104.com, the quality is unsatisfactory. 
+
+First, the percentage of missing values is very high, out of 1810 majors, only 985 of them have salary data. Aside from the potential problem with my code, on 104.com, there simply are too many programs with no salary data. This may lead to heavy selection bias. 
+
+Second, there are biases in the original data as well. 104.com calculates the distribution of CVs on its website. This excludes people that don't utilize job banks much, which can be either highly skilled (doctors, high-level managers) or the opposite (informal labors). 104.com also doesn't separate people with different working experiences. 
+
+Third, 104.com only reports distribution data, i.e., the portion of alumni whose salary is in a certain interval. I estimate the mean by assuming that salary distribute evenly within the interval, and simply the richest interval, larger than 80000 NTD, to between 80000 and 90000 NTD. This creates a downward bias for distributions with heavy tails.
+
+```{r 104 salary, message=FALSE, warning=FALSE}
+
+salary_path = "104salary.csv"
+
+#if method == "cache", use pre-saved data, if == "scrap" get data from 104
+getsalary = function(mns, method, filepath){ 
+  if (method == "cache"){
+    
+    #read pre-saved csv, generated from pervious session using method = 1
+    salary <- read.csv(filepath)
+    mns <- merge(mns, salary, by = "index") 
+    mns <- mns %>% mutate(sal_match = (!is.na(mns$avsalary))) %>% select(!X)
+    
+    return(mns)
+  }else if(method == "scrap"){
+    #retrived data directly from 104, code takes a while to run
+    
+    #in the main navigation page, get the urls corresponding to each school
+    topurl = "https://www.104.com.tw/jb/career/department/navigation"
+    select_schools = "body > div.container > div > div.mb.span-24 > dl > dd > ul > li > a"
+    school_urls = read_html(topurl) %>% html_elements(select_schools) %>% html_attr("href")
+    
+    #deal with discrepancy between 104 and MOE names
+    sublist = "私立|\\(.\\)|\\(..\\)|\\(...\\)|\\(....\\)|\\(.....\\)|\\(......\\)"
+    school_names = read_html(topurl) %>% html_elements(select_schools) %>% html_text()
+    school_names = gsub(sublist, "", school_names)
+    
+    #prepare tibbles
+    majorurl = tibble(
+      school = character(),
+      old_index = character(),
+      url = character()
+    )
+    
+    #in the navigation of majors given a school, find the urls corresponding to the majors
+    for(i in c(1:length(school_names))){
+      
+      #get all the majors under school i
+      urls = NA
+      urls = read_html(str_c("https://www.104.com.tw", school_urls[i])) %>% html_elements(".a2") %>% html_attr("href")
+      
+      #add the urls for these majors into dataframe for all urls
+      for(j in c(1:length(urls))){
+        temp1 = urls[j] %>% str_split("mid=")
+        majorurl <-  majorurl %>% add_row(school = school_names[i],
+                                          url = urls[j],
+                                          old_index = temp1[[1]][2] %>% str_sub(1,4))
+      }
+    }
+    
+    majorurl <- merge(majorurl, index_mapping, by = "old_index")
+    mns <- merge(mns, majorurl, by.x = c("dom_index", "school"), by.y = c("new_index", "school"), all.x = TRUE, all.y = FALSE)
+    mns <- mns[!duplicated(mns$index),]
+    
+    #add new columns into mns to prepare for adding salary
+    mns = mns %>% add_column(avsalary = NA, sal_match = NA)
+    
+    #since only distribution is given on 104 page, define the function that approximate average salary from distribution
+    dist_to_av = function(temp){
+      if(is.na(temp[1])){return(NA)}
+      salary = 0
+      plast = 0
+      for(j in c(1:length(temp))){
+        t = temp[j] %>% str_split("%")
+        port = (as.double(t[[1]][1])-plast)/100 - plast
+        aver = as.integer(str_extract(t[[1]][2],"\\d\\d\\d\\d\\d")) + 5000
+        salary = salary + port*aver
+        plast = port + plast
+      }
+      return(salary)
+    }
+    
+    #read the salary data from 104
+    for(i in c(1:nrow(mns))){  
+      if(is.na(mns$url[i])){next}
+      
+      temp = NA
+      url <- str_c("https://www.104.com.tw", mns$url[i])
+      
+      #get the webpage, the css selector select the texts related to the distribution of wage 
+      page <- read_html(url)
+      major_average_select = "body > div.container > div > div.ls.span-17 > div.m-box.w-salaryReport > div.content > ul > li > div > div.main > div > div.content"
+      temp <- page %>% html_nodes(major_average_select) %>% html_text()
+      
+      #calculate the average wage using function defied ealier
+      mns$avsalary[i] = dist_to_av(temp)
+    }
+    
+    #write data to csv for future use 
+    write.csv(mns[c("index", "avsalary")], filepath)
+    
+    #if the major have salary record on 104, diectsal = true
+    mns$sal_match <- (!is.na(mns$avsalary))
+    return(mns)
+    
+  }else{return(NA)}
+}
+
+#call the function, use method = "scrap" if want to scrap from 104 again, but it takes a while
+mns <- getsalary(mns, "cache", salary_path)
+
+mns %>% ggplot(aes(x = avsalary))+geom_density() + labs(title = "Distribution of adjusted salary", x = "salary")
+```
+
