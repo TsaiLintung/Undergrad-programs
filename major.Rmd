@@ -48,7 +48,7 @@ To explain them, I try to scrape data from 104.com for salaries and find dataset
 rm(list = ls())
 
 # Set working directory
-setwd("G:/我的雲端硬碟/Data Science/Major&Score")
+setwd("~/GitHub/undergrad-programs-selectiveness")
 
 # load packages
 library(tidyverse) #bread and butter
@@ -60,6 +60,21 @@ library(stringi) #locale-insensitive string manupulation
 library(rvest) #web
 library(skimr) #summary of datasets
 library(Rmisc) #multiplot
+
+#Set paths
+majortable_path = "data/02797dd0-2c24-43f9-b3e6-8844d1a25620.csv"
+score_path = "data/tabula-110_04.csv"
+teacher_path = "data/majorteacher.csv"
+ts_path = "data/teacherstudent.csv"
+budget_pu_path = "data/budget_public.csv"
+budget_pr_path = "data/budget_private.csv"
+salary_path = "data/104salary.csv"
+student_path = "data/majorstudent.csv"
+tuition_path = "data/tuition.csv"
+financial_pu_path = "data/financial_public.csv"
+financial_pr_path = "data/financial_private.csv"
+mapping_path = "data/reference.csv"
+domain_outcome_path = "data/學類.csv"
 
 # turn off scientific notation
 options(scipen = 9)
@@ -86,7 +101,6 @@ After I change the environment language, disable some default behaviors, and und
 ```{r Reference table, message = FALSE, warning = FALSE}
 
 #load csv, column names need to be first dropped otherwise read.csv don't work 
-majortable_path = "02797dd0-2c24-43f9-b3e6-8844d1a25620.csv"
 majortable <- read.csv(majortable_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
 
 #rename columns while dropiing unused columns
@@ -148,7 +162,6 @@ A multi-layered REGEX can also solve the problem, but I think the multi-line sol
 ```{r AST, message = FALSE, warning = FALSE}
 
 #load csv
-score_path = "tabula-110_04.csv"
 mns <- read.csv(score_path, check.names = FALSE, quote="", header = FALSE, stringsAsFactors=FALSE) %>% as_tibble()
 
 #rename columns whild dropping unused ones
@@ -270,7 +283,6 @@ I exclude the code because the datasets are tidy and the code is just importing,
 ```{r MOE program, echo = FALSE,message = FALSE, warning = FALSE}
 
 #student teacher ratio
-teacher_path = "majorteacher.csv"
 teacher <- read.csv(teacher_path, header = FALSE, skip = 1, check.names = FALSE, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
 teacher <- teacher %>% subset(V1 == 109) %>%  transmute(ma_index = as.factor(as.integer(V6)), 
                                                         sc_index = as.factor(as.integer(V4)), 
@@ -279,7 +291,6 @@ teacher <- teacher %>% subset(V1 == 109) %>%  transmute(ma_index = as.factor(as.
 #data saparates bachelor, master, and phd students and teachers, I aggregate them since they share the resources
 teacher <- teacher %>% group_by(ma_index, sc_index) %>% dplyr::summarize(.groups = "keep", teacher = sum(teacher))
 
-student_path = "majorstudent.csv"
 student <- read.csv(student_path, header = FALSE, skip = 1, check.names = FALSE, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
 student <- student %>% subset(V1 == 109) %>%  transmute(ma_index = as.factor(as.integer(V6)), 
                                                         sc_index = as.factor(as.integer(V4)), 
@@ -290,7 +301,6 @@ student <- student %>% group_by(ma_index, sc_index) %>% dplyr::summarize(.groups
 ts <- merge(student, teacher, by = c("ma_index", "sc_index"))
 ts <- ts %>% mutate(ts_ratio = student/teacher)
 
-tuition_path = "tuition.csv"
 tuition <- read.csv(tuition_path, header = FALSE, skip = 1, check.names = FALSE, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
 tuition <- tuition %>% subset(V1 == 109) %>%  transmute(ma_index = as.factor(as.integer(V6)), 
                                                         sc_index = as.factor(as.integer(V4)), 
@@ -303,25 +313,20 @@ mns <- merge(mns, tuition, by = c("ma_index", "sc_index"), all.x = TRUE, all.y =
 
 ```{r MOE school, echo = FALSE, message = FALSE, warning = FALSE}
 
-ts_path = "teacherstudent.csv"
 ts_ratio <- read.csv(ts_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
 ts_ratio <- ts_ratio %>% subset(V1 == 109) %>%  transmute(index = as.factor(as.integer(V4)), sc_size = V6, sc_teacher = V7, scts_ratio = V8) 
 
-financial_pu_path = "financial_public.csv"
 finan_pu <- read.csv(financial_pu_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
 finan_pu <- finan_pu %>% subset(V1 == 109) %>%  transmute(index = as.factor(as.integer(V4)), asset = V7, debt_ratio = V8) 
 
-financial_pr_path = "financial_private.csv"
 finan_pr <- read.csv(financial_pr_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
 finan_pr <- finan_pr %>% subset(V1 == 109) %>%  transmute(index = as.factor(as.integer(V4)), asset = V7, debt_ratio = V8) 
 
 finan <- rbind(finan_pr, finan_pu)
 
-budget_pu_path = "budget_public.csv"
 bud_pu <- read.csv(budget_pu_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
 bud_pu <- bud_pu %>%  subset(V1 == 109) %>% transmute(index = as.factor(as.integer(V4)), income = V7, tuition_ratio = V8)
 
-budget_pr_path = "budget_private.csv"
 bud_pr <- read.csv(budget_pr_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble
 bud_pr <- bud_pr %>%  subset(V1 == 109) %>% transmute(index = as.factor(as.integer(V4)), income = V7, tuition_ratio = V8)
 
@@ -356,7 +361,7 @@ This dataset uses a 4-digit domain index, which is not in the reference table. T
 #create the mapping between old and new index from the old-new index table
 
 #the pdf is from https://stats.moe.gov.tw/files/bcode/10609_5最近兩次修正架構對照表.pdf, and transformed to csv with tabula
-mapping_path = "reference.csv"
+
 index_mapping <- read.csv(mapping_path,check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble() %>% transmute(new_index = V2, old_index = V3) 
 
 index_mapping <- index_mapping %>% mutate(old_index = str_extract(old_index, "\\d+"), 
@@ -377,7 +382,6 @@ for (i in c(1:nrow(index_mapping))){
 index_mapping <- index_mapping %>% subset(!is.na(old_index)) 
 
 #import the employment outcome
-domain_outcome_path = "學類.csv"
 domout <- read.csv(domain_outcome_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = "UTF-8-BOM") %>% as_tibble()
 
 domout <- domout %>% transmute(old_index = as.factor(V1), 
@@ -664,8 +668,6 @@ Second, there are biases in the original data as well. 104.com calculates the di
 Third, 104.com only reports distribution data, i.e., the portion of alumni whose salary is in a certain interval. I estimate the mean by assuming that salary distribute evenly within the interval, and simply the richest interval, larger than 80000 NTD, to between 80000 and 90000 NTD. This creates a downward bias for distributions with heavy tails.
 
 ```{r 104 salary, message=FALSE, warning=FALSE}
-
-salary_path = "104salary.csv"
 
 #if method == "cache", use pre-saved data, if == "scrap" get data from 104
 getsalary = function(mns, method, filepath){ 

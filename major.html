@@ -1698,7 +1698,6 @@ Last update: 2022/4/22<br />
 <p><strong>Reading CSV in Chinese</strong></p>
 <p>After I change the environment language, disable some default behaviors, and understand the difference between UTF-8 and UTF-8-BOM encoding, <em>read.csv</em> runs consistently for the rest of the project.</p>
 <pre class="r"><code>#load csv, column names need to be first dropped otherwise read.csv don&#39;t work 
-majortable_path = &quot;02797dd0-2c24-43f9-b3e6-8844d1a25620.csv&quot;
 majortable &lt;- read.csv(majortable_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = &quot;UTF-8-BOM&quot;) %&gt;% as_tibble
 
 #rename columns while dropiing unused columns
@@ -1749,7 +1748,6 @@ majortable &lt;- majortable %&gt;% mutate(bigarea = ifelse(is.element(area, STEM
 <p>I need to parse the name of the subprograms into programs, for example, from “政治系國際關係組” to just “政治系”. First I delete everything after “系”. But this also reduces “工程與<em>系</em>統科學系” into “工程與系”. So “系統” needs to be an exception. But then “<em>系統</em>科學組” is not deleted, so it needs to be an exception within the exception.</p>
 <p>A multi-layered REGEX can also solve the problem, but I think the multi-line solution is more readable. Another option is to get the index for the last “系” or “學程” and delete characters afterward, but there is a program named “精密<em>系</em>統設計學士學位學程”.</p>
 <pre class="r"><code>#load csv
-score_path = &quot;tabula-110_04.csv&quot;
 mns &lt;- read.csv(score_path, check.names = FALSE, quote=&quot;&quot;, header = FALSE, stringsAsFactors=FALSE) %&gt;% as_tibble()
 
 #rename columns whild dropping unused ones
@@ -1864,7 +1862,7 @@ mns &lt;- mns[!duplicated(mns$index),]</code></pre>
 <pre class="r"><code>#create the mapping between old and new index from the old-new index table
 
 #the pdf is from https://stats.moe.gov.tw/files/bcode/10609_5最近兩次修正架構對照表.pdf, and transformed to csv with tabula
-mapping_path = &quot;reference.csv&quot;
+
 index_mapping &lt;- read.csv(mapping_path,check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = &quot;UTF-8-BOM&quot;) %&gt;% as_tibble() %&gt;% transmute(new_index = V2, old_index = V3) 
 
 index_mapping &lt;- index_mapping %&gt;% mutate(old_index = str_extract(old_index, &quot;\\d+&quot;), 
@@ -1885,7 +1883,6 @@ for (i in c(1:nrow(index_mapping))){
 index_mapping &lt;- index_mapping %&gt;% subset(!is.na(old_index)) 
 
 #import the employment outcome
-domain_outcome_path = &quot;學類.csv&quot;
 domout &lt;- read.csv(domain_outcome_path, check.names = FALSE, header = FALSE, skip = 1, stringsAsFactors=FALSE, fileEncoding = &quot;UTF-8-BOM&quot;) %&gt;% as_tibble()
 
 domout &lt;- domout %&gt;% transmute(old_index = as.factor(V1), 
@@ -2814,9 +2811,7 @@ F Statistic
 <p>First, the percentage of missing values is very high, out of 1810 majors, only 985 of them have salary data. Aside from the potential problem with my code, on 104.com, there simply are too many programs with no salary data. This may lead to heavy selection bias.</p>
 <p>Second, there are biases in the original data as well. 104.com calculates the distribution of CVs on its website. This excludes people that don’t utilize job banks much, which can be either highly skilled (doctors, high-level managers) or the opposite (informal labors). 104.com also doesn’t separate people with different working experiences.</p>
 <p>Third, 104.com only reports distribution data, i.e., the portion of alumni whose salary is in a certain interval. I estimate the mean by assuming that salary distribute evenly within the interval, and simply the richest interval, larger than 80000 NTD, to between 80000 and 90000 NTD. This creates a downward bias for distributions with heavy tails.</p>
-<pre class="r"><code>salary_path = &quot;104salary.csv&quot;
-
-#if method == &quot;cache&quot;, use pre-saved data, if == &quot;scrap&quot; get data from 104
+<pre class="r"><code>#if method == &quot;cache&quot;, use pre-saved data, if == &quot;scrap&quot; get data from 104
 getsalary = function(mns, method, filepath){ 
   if (method == &quot;cache&quot;){
     
